@@ -23,9 +23,3 @@ dependencies {
     // Use JUnit Jupiter for testing.
     testImplementation 'org.junit.jupiter:junit-jupiter:5.8.2'
 }
-
-allprojects {
-    afterEvaluate {
-        it.getPlugins().apply(org.eclipse.jdt.ls.android.BuildshipAndroidPluginPlugin.class)
-    }
-}
