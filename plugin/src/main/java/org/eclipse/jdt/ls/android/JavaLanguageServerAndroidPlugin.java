@@ -3,34 +3,40 @@
  */
 package org.eclipse.jdt.ls.android;
 
-import groovy.lang.MissingPropertyException;
 import org.gradle.api.Action;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
-import org.gradle.api.Task;
 import org.gradle.api.artifacts.Configuration;
 import org.gradle.api.artifacts.ConfigurationContainer;
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency;
 import org.gradle.plugins.ide.eclipse.model.EclipseModel;
 
+import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.List;
 
-/**
- * A simple 'hello world' plugin.
- */
-public class BuildshipAndroidPluginPlugin implements Plugin<Project> {
+public class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
+
+	private static final String ANDROID_BASE_PLUGIN_ID = "com.android.base";
+	private static final List<String> ANDROID_PLUGIN_IDS = Arrays.asList("android", "android-library", "com.android.application", "com.android.feature", "com.android.instantapp", "com.android.library", "com.android.test");
+
 	public void apply(Project project) {
 		project.afterEvaluate(new Action<Project>() {
 			@Override
 			public void execute(Project project) {
-				// TODO: check property
-				if (!project.hasProperty("android")) {
+				if (!isAndroidProject(project)) {
 					return;
 				}
-				EclipseModel eclipseModel = eclipseModel(project);
+				// buildship indicator
+				if (!project.hasProperty("eclipse")) {
+					return;
+				}
+				EclipseModel eclipseModel = (EclipseModel) project.property("eclipse");
+				Object android = project.property("android");
+				Method[] methods = android.getClass().getMethods();
 				ConfigurationContainer container = project.getConfigurations();
 				try {
-					Configuration config = container.getByName("debugUnitTestRuntimeClasspath");
+					Configuration config = container.getByName("debugAndroidTestRuntimeClasspath");
 					Configuration config1 = container.getByName("implementation");
 					config1.getDependencies().forEach(dep -> {
 						if (dep instanceof DefaultProjectDependency) {
@@ -46,16 +52,22 @@ public class BuildshipAndroidPluginPlugin implements Plugin<Project> {
 				}
 				eclipseModel.getClasspath().getFile().beforeMerged(new AddSourceFoldersAction());
 				eclipseModel.getClasspath().getFile().whenMerged(new GenerateLibraryDependenciesAction(project));
-				eclipseModel.getClasspath().getFile().whenMerged(new AndroidSdkLibraryDependenciesAction(project));
+				eclipseModel.getClasspath().getFile().whenMerged(new AddBootClasspathAction(project));
 			}
+
+
 		});
 	}
 
-	private EclipseModel eclipseModel(Project project) {
-		try {
-			return (EclipseModel) project.property("eclipse");
-		} catch (MissingPropertyException e) {
-			throw new RuntimeException("Cannot find 'eclipse' property.\nEnsure that the following is in your project: \n\napply plugin: 'eclipse'\n\n", e);
+	private boolean isAndroidProject(Project project) {
+		if (project.getPlugins().hasPlugin(ANDROID_BASE_PLUGIN_ID)) {
+			return true;
 		}
+		for (String pluginId : ANDROID_PLUGIN_IDS) {
+			if (project.getPlugins().hasPlugin(pluginId)) {
+				return true;
+			}
+		}
+		return false;
 	}
 }
