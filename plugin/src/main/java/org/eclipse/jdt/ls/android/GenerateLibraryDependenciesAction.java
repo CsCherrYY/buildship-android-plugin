@@ -2,10 +2,7 @@ package org.eclipse.jdt.ls.android;
 
 import org.gradle.api.Action;
 import org.gradle.api.Project;
-import org.gradle.plugins.ide.eclipse.model.Classpath;
-import org.gradle.plugins.ide.eclipse.model.ClasspathEntry;
-import org.gradle.plugins.ide.eclipse.model.Library;
-import org.gradle.plugins.ide.eclipse.model.ProjectDependency;
+import org.gradle.plugins.ide.eclipse.model.*;
 import org.gradle.plugins.ide.eclipse.model.internal.FileReferenceFactory;
 
 import java.io.File;
@@ -41,6 +38,10 @@ public class GenerateLibraryDependenciesAction implements Action<Classpath> {
             if (library.getPath().endsWith(".aar")) {
                 return explodeAarJarFiles(library);
             }
+        } else if (entry instanceof Container) {
+            if (((Container) entry).getPath().contains("JavaSE")) {
+                return Stream.empty();
+            }
         }
         return Stream.of(entry);
     }
@@ -55,7 +56,7 @@ public class GenerateLibraryDependenciesAction implements Action<Classpath> {
             }
             try (ZipFile zipFile = new ZipFile(aarFile)) {
                 zipFile.stream().forEach(f -> {
-                    if (f.getName().endsWith(".jar")) {
+                    if (f.getName().equals("classes.jar")) {
                         String targetName = jarId + ".jar";
                         File targetFile = new File(targetFolder, targetName);
                         ensureParentFolderExists(targetFile);

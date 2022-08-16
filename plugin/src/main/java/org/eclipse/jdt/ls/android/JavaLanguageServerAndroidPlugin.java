@@ -6,16 +6,20 @@ package org.eclipse.jdt.ls.android;
 import org.gradle.api.Action;
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
+import org.gradle.api.UnknownTaskException;
 import org.gradle.api.artifacts.Configuration;
 import org.gradle.api.artifacts.ConfigurationContainer;
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency;
 import org.gradle.plugins.ide.eclipse.model.EclipseModel;
+import org.gradle.util.GradleVersion;
 
-import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.List;
 
 public class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
+
+	public static final String DEFAULT_OUTPUT_MAIN = "bin/main";
+	public static final String DEFAULT_OUTPUT_TEST = "bin/test";
 
 	private static final String ANDROID_BASE_PLUGIN_ID = "com.android.base";
 	private static final List<String> ANDROID_PLUGIN_IDS = Arrays.asList("android", "android-library", "com.android.application", "com.android.feature", "com.android.instantapp", "com.android.library", "com.android.test");
@@ -32,30 +36,24 @@ public class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 					return;
 				}
 				EclipseModel eclipseModel = (EclipseModel) project.property("eclipse");
-				Object android = project.property("android");
-				Method[] methods = android.getClass().getMethods();
-				ConfigurationContainer container = project.getConfigurations();
-				try {
-					Configuration config = container.getByName("debugAndroidTestRuntimeClasspath");
-					Configuration config1 = container.getByName("implementation");
-					config1.getDependencies().forEach(dep -> {
-						if (dep instanceof DefaultProjectDependency) {
-							if (((DefaultProjectDependency) dep).getTargetConfiguration() == null) {
-								((DefaultProjectDependency) dep).setTargetConfiguration("default");
-							}
+				// https://www.eclipse.org/community/eclipse_newsletter/2019/june/buildship.php
+				if (GradleVersion.version(project.getGradle().getGradleVersion()).compareTo(GradleVersion.version("5.4")) >= 0) {
+					try {
+						if (project.getTasks().getByName("compileDebugSources") != null) {
+							eclipseModel.synchronizationTasks("compileDebugSources");
 						}
-					});
-					config1.setCanBeResolved(true);
-					eclipseModel.getClasspath().getPlusConfigurations().addAll(Arrays.asList(config, config1));
-				} catch (Exception e) {
-					String test = "";
+					} catch (UnknownTaskException e) {
+						// Do nothing
+					}
 				}
-				eclipseModel.getClasspath().getFile().beforeMerged(new AddSourceFoldersAction());
-				eclipseModel.getClasspath().getFile().whenMerged(new GenerateLibraryDependenciesAction(project));
+				AddPlusConfigurationHandler.addPlusConfiguration(project, eclipseModel);
+				eclipseModel.getClasspath().setDownloadSources(true);
+				eclipseModel.getClasspath().getFile().whenMerged(new AddSourceFoldersAction(project));
+				eclipseModel.getClasspath().getFile().whenMerged(new AddDataBindingClasspathAction(project));
+				eclipseModel.getClasspath().getFile().whenMerged(new AddRClasspathAction(project));
 				eclipseModel.getClasspath().getFile().whenMerged(new AddBootClasspathAction(project));
+				eclipseModel.getClasspath().getFile().whenMerged(new GenerateLibraryDependenciesAction(project));
 			}
-
-
 		});
 	}
 

@@ -15,6 +15,16 @@ sourceCompatibility = JavaVersion.VERSION_1_8
 targetCompatibility = JavaVersion.VERSION_1_8
 
 repositories {
-    // Use Maven Central for resolving dependencies.
     mavenCentral()
+    google()
 }
+
+gradlePlugin {
+    plugins {
+        create("JavaLanguageServerAndroidPlugin") {
+            id = "org.eclipse.jdt.ls.androidPlugin"
+            implementationClass = "org.eclipse.jdt.ls.android.JavaLanguageServerAndroidPlugin"
+        }
+    }
+}
+
