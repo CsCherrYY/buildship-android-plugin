@@ -3,21 +3,19 @@
  *
  * This generated file contains a sample Gradle plugin project to get you started.
  * For more details take a look at the Writing Custom Plugins chapter in the Gradle
- * User Manual available at https://docs.gradle.org/7.5/userguide/custom_plugins.html
+ * User Manual available at https://docs.gradle.org/7.2/userguide/custom_plugins.html
  */
 
 plugins {
     // Apply the Java Gradle plugin development plugin to add support for developing Gradle plugins
     id 'java-gradle-plugin'
+
+    // Apply the Groovy plugin to add support for Groovy
+    id 'groovy'
 }
 
 sourceCompatibility = JavaVersion.VERSION_1_8
 targetCompatibility = JavaVersion.VERSION_1_8
-
-repositories {
-    mavenCentral()
-    google()
-}
 
 gradlePlugin {
     plugins {
