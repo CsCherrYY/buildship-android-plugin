@@ -6,6 +6,7 @@ import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.Dependency
 import org.gradle.api.internal.FactoryNamedDomainObjectContainer
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency
+import org.gradle.plugins.ide.eclipse.internal.AfterEvaluateHelper
 import org.gradle.plugins.ide.eclipse.model.EclipseModel
 import org.gradle.plugins.ide.eclipse.model.SourceFolder
 import org.gradle.plugins.ide.eclipse.model.ClasspathEntry
@@ -30,27 +31,40 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
     public static final String DEFAULT_OUTPUT_MAIN = "bin/main"
     public static final String DEFAULT_OUTPUT_TEST = "bin/test"
 
-    private static final List<String> CLASSPATH_CONFIGURATIONS = Arrays.asList("debugAndroidTestCompileClasspath", "debugUnitTestCompileClasspath")
-    private static final List<String> UNRESOLVED_CLASSPATH_CONFIGURATIONS = Arrays.asList("implementation", "testImplementation", "androidTestImplementation")
+    private static final List<String> CLASSPATH_CONFIGURATIONS = Arrays.asList("debugUnitTestRuntimeClasspath",
+            "debugCompileClasspath")
+    private static final List<String> UNRESOLVED_CLASSPATH_CONFIGURATIONS = Arrays.asList(
+            "implementation"/*, "testImplementation", "androidTestImplementation",
+            "compile", "testCompile", "androidTestCompile", "compileOnly",
+            "api", "testApi", "androidTestApi"*/)
     private static final String ANDROID_BASE_PLUGIN_ID = "com.android.base"
     private static final List<String> ANDROID_PLUGIN_IDS = Arrays.asList("android", "android-library", "com.android.application", "com.android.library", "com.android.test")
 
     void apply(Project project) {
-        ResolveAndroidProjectAction a = new ResolveAndroidProjectAction()
-        a.execute(project)
-        //project.afterEvaluate(new ResolveAndroidProjectAction())
+        if (!ResolveAndroidProjectAction.isAndroidProject(project)) {
+            return
+        }
+        // buildship indicator
+        if (!project.hasProperty("eclipse")) {
+            return
+        }
+
+        project.afterEvaluate {
+            project.plugins.withId("eclipse") {
+                project.plugins.withId("com.android.base") {
+                    ResolveAndroidProjectAction a = new ResolveAndroidProjectAction()
+                    a.execute(project)
+                }
+            }
+        }
+
+
+        //project.afterEvaluate(new AfterEvaluateProjectAction())
     }
 
-    private static class ResolveAndroidProjectAction implements Action<Project> {
+    private static class AfterEvaluateProjectAction implements Action<Project> {
         @Override
         void execute(Project project) {
-            if (!isAndroidProject(project)) {
-                return
-            }
-            // buildship indicator
-            if (!project.hasProperty("eclipse")) {
-                return
-            }
             EclipseModel eclipseModel = (EclipseModel) project.property("eclipse")
             // https://www.eclipse.org/community/eclipse_newsletter/2019/june/buildship.php
             if (GradleVersion.version(project.getGradle().getGradleVersion()) >= GradleVersion.version("5.4")) {
@@ -66,13 +80,29 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                     // Do nothing
                 }
             }
-            addPlusConfiguration(project, eclipseModel)
+        }
+    }
+
+    private static class ResolveAndroidProjectAction implements Action<Project> {
+        @Override
+        void execute(Project project) {
+            if (!isAndroidProject(project)) {
+                return
+            }
+            // buildship indicator
+            if (!project.hasProperty("eclipse")) {
+                return
+            }
+            EclipseModel eclipseModel = (EclipseModel) project.getExtensions().getByType(EclipseModel)
+            ResolveAndroidProjectAction.addPlusConfiguration(project, eclipseModel)
             eclipseModel.getClasspath().setDownloadSources(true)
-            eclipseModel.getClasspath().getFile().whenMerged(new AddSourceFoldersAction(project))
-            eclipseModel.getClasspath().getFile().whenMerged(new AddDataBindingClasspathAction(project))
-            eclipseModel.getClasspath().getFile().whenMerged(new AddRClasspathAction(project))
-            eclipseModel.getClasspath().getFile().whenMerged(new AddBootClasspathAction(project))
-            eclipseModel.getClasspath().getFile().whenMerged(new GenerateLibraryDependenciesAction(project))
+            eclipseModel.classpath.containers.removeIf(container -> container.contains("JavaSE"))
+            eclipseModel.classpath.file.whenMerged(new AddSourceFoldersAction(project))
+            eclipseModel.classpath.file.whenMerged(new AddDataBindingClasspathAction(project))
+            eclipseModel.classpath.file.whenMerged(new AddRClasspathAction(project))
+            eclipseModel.classpath.file.whenMerged(new AddBuildConfigAction(project))
+            eclipseModel.classpath.file.whenMerged(new AddBootClasspathAction(project))
+            eclipseModel.classpath.file.whenMerged(new GenerateLibraryDependenciesAction(project))
         }
 
         private static boolean isAndroidProject(Project project) {
@@ -90,26 +120,42 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         private static void addPlusConfiguration(Project project, EclipseModel eclipseModel) {
             List<Configuration> plusConfigurations = new ArrayList<>()
             SortedMap<String, Configuration> configurations = project.getConfigurations().getAsMap()
-            for (String config : UNRESOLVED_CLASSPATH_CONFIGURATIONS) {
-                if (configurations.containsKey(config)) {
-                    Configuration configuration = configurations.get(config)
-                    // set null target as default target
-                    for (Dependency dependency : configuration.getDependencies()) {
-                        if (dependency instanceof DefaultProjectDependency) {
-                            if (((DefaultProjectDependency) dependency).getTargetConfiguration() == null) {
-                                ((DefaultProjectDependency) dependency).setTargetConfiguration("default")
+//            for (String config : UNRESOLVED_CLASSPATH_CONFIGURATIONS) {
+//                if (configurations.containsKey(config)) {
+//                    Configuration configuration = configurations.get(config)
+//                    // set null target as default target
+////                    for (Dependency dependency : configuration.getDependencies()) {
+////                        if (dependency instanceof DefaultProjectDependency) {
+////                            if (((DefaultProjectDependency) dependency).getTargetConfiguration() == null) {
+////                                ((DefaultProjectDependency) dependency).setTargetConfiguration("default")
+////                            }
+////                        }
+////                    }
+//                    configuration.setCanBeResolved(true)
+//                    plusConfigurations.add(configuration)
+//                }
+//            }
+            for (String configurationName : configurations.keySet()) {
+                for (String config : CLASSPATH_CONFIGURATIONS) {
+                    if (configurationName.toLowerCase().contains(config.toLowerCase())) {
+                        Configuration configuration = configurations.get(configurationName)
+                        for (Dependency dependency : configuration.getDependencies()) {
+                            if (dependency instanceof DefaultProjectDependency) {
+                                if (((DefaultProjectDependency) dependency).getTargetConfiguration() == null) {
+                                    ((DefaultProjectDependency) dependency).setTargetConfiguration("default")
+                                }
                             }
                         }
+                        plusConfigurations.add(configuration)
                     }
-                    configuration.setCanBeResolved(true)
-                    plusConfigurations.add(configuration)
                 }
             }
-            for (String configurationName : CLASSPATH_CONFIGURATIONS) {
-                if (configurations.containsKey(configurationName)) {
-                    plusConfigurations.add(configurations.get(configurationName))
-                }
-            }
+//            for (String config : CLASSPATH_CONFIGURATIONS) {
+//                if (configurations.containsKey(config)) {
+//                    Configuration configuration = configurations.get(config)
+//                    plusConfigurations.add(configuration)
+//                }
+//            }
             eclipseModel.getClasspath().getPlusConfigurations().addAll(plusConfigurations)
         }
     }
@@ -220,9 +266,31 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                     }
                 }
             }
+            // TODO: support variable R folders
             Path RAbsoluteFolderPath = Paths.get(project.buildDir.absolutePath, "generated", "not_namespaced_r_class_sources", "debug", "processDebugResources", "r")
             if (RAbsoluteFolderPath.toFile().exists()) {
                 classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(RAbsoluteFolderPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
+            } else {
+                RAbsoluteFolderPath = Paths.get(project.buildDir.absolutePath, "generated", "source", "r", "debug")
+                if (RAbsoluteFolderPath.toFile().exists()) {
+                    classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(RAbsoluteFolderPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
+                }
+            }
+        }
+    }
+
+    private static class AddBuildConfigAction implements Action<Classpath> {
+        private final Project project
+
+        AddBuildConfigAction(Project project) {
+            this.project = project
+        }
+
+        @Override
+        void execute(Classpath classpath) {
+            Path buildConfigPath = Paths.get(project.buildDir.absolutePath, "generated", "source", "buildConfig", "debug")
+            if (buildConfigPath.toFile().exists()) {
+                classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(buildConfigPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
             }
         }
     }
@@ -248,6 +316,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                                 return
                             }
                             Library library = new Library(fileReferenceFactory.fromFile((File) bootClasspath))
+                            library.entryAttributes.put("module", "false")
                             classpath.getEntries().add(library)
                         }
                     }
@@ -280,7 +349,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                 }
             } else if (entry instanceof Container) {
                 if (((Container) entry).getPath().contains("JavaSE")) {
-                    return Stream.empty()
+                    //return Stream.empty()
                 }
             }
             return Stream.of(entry)
