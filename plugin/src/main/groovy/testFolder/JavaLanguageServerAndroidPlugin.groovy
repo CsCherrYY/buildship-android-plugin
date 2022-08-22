@@ -17,12 +17,9 @@ import org.gradle.util.GradleVersion
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import java.util.stream.Collectors
-import java.util.stream.Stream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
-import static java.lang.String.format
 
 class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
@@ -87,16 +84,18 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                 return
             }
             EclipseModel eclipseModel = (EclipseModel) project.getExtensions().getByType(EclipseModel)
-            ResolveAndroidProjectAction.addPlusConfiguration(project, eclipseModel)
+            addPlusConfiguration(project, eclipseModel)
             eclipseModel.getClasspath().setDownloadSources(true)
-            // remove JDK container since the related types are included in android.jar
+            // remove JDK container since android project should use embedded JDK types included in android.jar
             eclipseModel.classpath.containers.removeIf(container -> container.contains("JavaSE"))
             eclipseModel.classpath.file.whenMerged(new AddSourceFoldersAction(project))
             eclipseModel.classpath.file.whenMerged(new AddDataBindingClasspathAction(project))
             eclipseModel.classpath.file.whenMerged(new AddRClasspathAction(project))
             eclipseModel.classpath.file.whenMerged(new AddBuildConfigAction(project))
-            eclipseModel.classpath.file.whenMerged(new AddBootClasspathAction(project))
-            eclipseModel.classpath.file.whenMerged(new AddDependenciesAction(project))
+            // add android.jar from Android bootClasspath to project classpath
+            eclipseModel.classpath.file.whenMerged(new AddAndroidSDKAction(project))
+            // extract classes.jar from aar dependencies and add them to classpath
+            eclipseModel.classpath.file.whenMerged(new ExtractAARDependenciesAction(project))
         }
 
         private static boolean isAndroidProject(Project project) {
@@ -237,6 +236,8 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
         @Override
         void execute(Classpath classpath) {
+            // from AGP 3.6 Android R class files are generated directly.
+            // See: https://android-developers.googleblog.com/2020/02/android-studio-36.html
             Path intermediatesAbsolutePath = Paths.get(project.buildDir.absolutePath, "intermediates")
             File intermediatesAbsoluteFolder = intermediatesAbsolutePath.toFile()
             if (intermediatesAbsoluteFolder.exists() && intermediatesAbsoluteFolder.isDirectory()) {
@@ -289,11 +290,11 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         }
     }
 
-    private static class AddBootClasspathAction implements Action<Classpath> {
+    private static class AddAndroidSDKAction implements Action<Classpath> {
         private final Project project
         private final FileReferenceFactory fileReferenceFactory
 
-        AddBootClasspathAction(Project project) {
+        AddAndroidSDKAction(Project project) {
             this.project = project
             this.fileReferenceFactory = new FileReferenceFactory()
         }
@@ -302,16 +303,14 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         void execute(Classpath classpath) {
             Object android = project.property("android")
             try {
-                Object bootClasspaths = android.getClass().getMethod("getBootClasspath").invoke(android)
-                if (bootClasspaths instanceof List) {
-                    for (Object bootClasspath : ((List) bootClasspaths)) {
+                Object bootClasspathList = android.getClass().getMethod("getBootClasspath").invoke(android)
+                if (bootClasspathList instanceof List) {
+                    for (Object bootClasspath : ((List) bootClasspathList)) {
                         if (bootClasspath instanceof File) {
-                            if (!((File) bootClasspath).getAbsolutePath().endsWith("android.jar")) {
-                                return
+                            File file = (File) bootClasspath
+                            if (file.getAbsolutePath().endsWith("android.jar")) {
+                                classpath.getEntries().add(new Library(fileReferenceFactory.fromFile(file)))
                             }
-                            Library library = new Library(fileReferenceFactory.fromFile((File) bootClasspath))
-                            library.entryAttributes.put("module", "false")
-                            classpath.getEntries().add(library)
                         }
                     }
                 }
@@ -321,96 +320,70 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         }
     }
 
-    private static class AddDependenciesAction implements Action<Classpath> {
-        private final Project project
+    private static class ExtractAARDependenciesAction implements Action<Classpath> {
 
-        AddDependenciesAction(Project project) {
+        private static final String EXTRACT_AAR_RELATIVE_PATH = "aarLibraries"
+        private static final String AAR_EXTENSION = ".aar"
+        private static final String DEPENDENCY_ENTRY_NAME = "classes.jar"
+
+        private final Project project
+        private final FileReferenceFactory fileReferenceFactory
+
+        ExtractAARDependenciesAction(Project project) {
             this.project = project
+            this.fileReferenceFactory = new FileReferenceFactory()
         }
 
         @Override
         void execute(Classpath classpath) {
-            List<ClasspathEntry> entries = classpath.getEntries().stream().flatMap(entry -> mapToJars(entry))
-                    .collect(Collectors.toList())
-            classpath.setEntries(entries)
-        }
-
-        private Stream<ClasspathEntry> mapToJars(ClasspathEntry entry) {
-            if (entry instanceof Library) {
-                Library library = (Library) entry
-                if (library.getPath().endsWith(".aar")) {
-                    return explodeAarJarFiles(library)
+            List<ClasspathEntry> jarEntries = new ArrayList<>()
+            for (ClasspathEntry entry : classpath.entries) {
+                if (entry instanceof Library && ((Library) entry).path.endsWith(AAR_EXTENSION)) {
+                    ClasspathEntry aarClasspathEntry = getClasspathEntryFromAAR((Library) entry)
+                    if (aarClasspathEntry != null) {
+                        jarEntries.add(aarClasspathEntry)
+                    }
+                } else {
+                    jarEntries.add(entry)
                 }
             }
-            return Stream.of(entry)
+            classpath.setEntries(jarEntries)
         }
 
-        private Stream<ClasspathEntry> explodeAarJarFiles(Library aarLibrary) {
-            File aarFile = new File(aarLibrary.getPath())
-            String jarId = aarLibrary.getModuleVersion().toString().replaceAll(":", "-")
-            File targetFolder = new File(new File(project.buildDir, "exploded-aars"), jarId)
-            if (!targetFolder.exists()) {
-                if (!targetFolder.mkdirs()) {
-                    throw new RuntimeException(format("Cannot create folder: {0}", targetFolder.getAbsolutePath()))
-                }
-                try (ZipFile zipFile = new ZipFile(aarFile)) {
-                    zipFile.stream().forEach(f -> {
-                        if (f.getName() == "classes.jar") {
-                            String targetName = jarId + ".jar"
-                            File targetFile = new File(targetFolder, targetName)
-                            ensureParentFolderExists(targetFile)
-                            int index = 1
-                            while (targetFile.exists()) {
-                                targetFile = new File(targetFolder, format("{0}_{1}", ++index, targetName))
-                            }
-                            copy(zipFile, targetFile, f)
-                        }
-                    })
-                } catch (IOException e) {
-                    throw new RuntimeException(
-                            format("Cannot explode aar: {0}: {1}", e.getMessage(), aarFile.getAbsolutePath()), e)
-                }
-            }
-            List<File> files = listFilesTraversingFolders(targetFolder)
-            FileReferenceFactory fileReferenceFactory = new FileReferenceFactory()
-            return files.stream().filter(f -> f.getName().endsWith(".jar")).map(f -> {
-                Library library = new Library(fileReferenceFactory.fromFile(f))
-                library.setSourcePath(aarLibrary.getSourcePath())
-                return library
-            })
-        }
-
-        private List<File> listFilesTraversingFolders(File folder) {
-            List<File> files = new ArrayList<>()
-            File[] children = folder.listFiles()
-            if (children != null) {
-                for (File child : children) {
-                    if (child.isFile()) {
-                        files.add(child)
-                    } else if (child.isDirectory()) {
-                        files.addAll(listFilesTraversingFolders(child))
+        private ClasspathEntry getClasspathEntryFromAAR(Library aarLibrary) {
+            String libraryName = aarLibrary.getModuleVersion().toString().replaceAll(":", "-")
+            Path libraryFolderPath = Paths.get(project.buildDir.absolutePath, EXTRACT_AAR_RELATIVE_PATH)
+            File libraryFolder = libraryFolderPath.toFile()
+            try {
+                if (!libraryFolder.exists()) {
+                    if (!libraryFolder.mkdirs()) {
+                        return null
                     }
                 }
+            } catch (SecurityException ignored) {
+                return null
             }
-            return files
-        }
-
-        private static void ensureParentFolderExists(File targetFile) {
-            File parentFolder = targetFile.getParentFile()
-            if (!parentFolder.exists()) {
-                if (!parentFolder.mkdirs()) {
-                    throw new RuntimeException(format("Cannot create folder: {0}", parentFolder.getAbsolutePath()))
+            Path libraryPath = libraryFolderPath.resolve(Paths.get(libraryName + ".jar"))
+            File libraryFile = libraryPath.toFile()
+            if (!libraryFile.exists()) {
+                try (ZipFile zipFile = new ZipFile(new File(aarLibrary.getPath()))) {
+                    for (ZipEntry entry : zipFile.entries()) {
+                        if (entry.name == DEPENDENCY_ENTRY_NAME) {
+                            InputStream ins = zipFile.getInputStream(entry)
+                            Files.copy(ins, libraryPath)
+                            break
+                        }
+                    }
+                } catch (IOException | NullPointerException ignored) {
+                    return null
                 }
             }
-        }
-
-        private static void copy(ZipFile zipFile, File targetFile, ZipEntry entry) {
-            try (InputStream inputStream = zipFile.getInputStream(entry)) {
-                Files.copy(inputStream, targetFile.toPath())
-            } catch (IOException e) {
-                throw new RuntimeException(
-                        format("Cannot write entry to file: {0}: {1}", e.getMessage(), targetFile.getAbsolutePath()), e)
+            if (libraryFile.exists()) {
+                Library library = new Library(fileReferenceFactory.fromFile(libraryFile))
+                library.setSourcePath(aarLibrary.getSourcePath())
+                return library
             }
+            return null
         }
     }
 }
