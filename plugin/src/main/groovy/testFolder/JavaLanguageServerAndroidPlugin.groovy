@@ -6,12 +6,10 @@ import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.Dependency
 import org.gradle.api.internal.FactoryNamedDomainObjectContainer
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency
-import org.gradle.plugins.ide.eclipse.internal.AfterEvaluateHelper
 import org.gradle.plugins.ide.eclipse.model.EclipseModel
 import org.gradle.plugins.ide.eclipse.model.SourceFolder
 import org.gradle.plugins.ide.eclipse.model.ClasspathEntry
 import org.gradle.plugins.ide.eclipse.model.Classpath
-import org.gradle.plugins.ide.eclipse.model.Container
 import org.gradle.plugins.ide.eclipse.model.Library
 import org.gradle.plugins.ide.eclipse.model.internal.FileReferenceFactory
 import org.gradle.util.GradleVersion
@@ -32,7 +30,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
     public static final String DEFAULT_OUTPUT_TEST = "bin/test"
 
     private static final List<String> CLASSPATH_CONFIGURATIONS = Arrays.asList("debugUnitTestRuntimeClasspath",
-            "debugCompileClasspath")
+            "debugCompileClasspath", "debugAndroidTestRuntimeClasspath")
     private static final List<String> UNRESOLVED_CLASSPATH_CONFIGURATIONS = Arrays.asList(
             "implementation"/*, "testImplementation", "androidTestImplementation",
             "compile", "testCompile", "androidTestCompile", "compileOnly",
@@ -50,14 +48,9 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         }
 
         project.afterEvaluate {
-            project.plugins.withId("eclipse") {
-                project.plugins.withId("com.android.base") {
-                    ResolveAndroidProjectAction a = new ResolveAndroidProjectAction()
-                    a.execute(project)
-                }
-            }
+            ResolveAndroidProjectAction a = new ResolveAndroidProjectAction()
+            a.execute(project)
         }
-
 
         //project.afterEvaluate(new AfterEvaluateProjectAction())
     }
@@ -96,13 +89,14 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             EclipseModel eclipseModel = (EclipseModel) project.getExtensions().getByType(EclipseModel)
             ResolveAndroidProjectAction.addPlusConfiguration(project, eclipseModel)
             eclipseModel.getClasspath().setDownloadSources(true)
+            // remove JDK container since the related types are included in android.jar
             eclipseModel.classpath.containers.removeIf(container -> container.contains("JavaSE"))
             eclipseModel.classpath.file.whenMerged(new AddSourceFoldersAction(project))
             eclipseModel.classpath.file.whenMerged(new AddDataBindingClasspathAction(project))
             eclipseModel.classpath.file.whenMerged(new AddRClasspathAction(project))
             eclipseModel.classpath.file.whenMerged(new AddBuildConfigAction(project))
             eclipseModel.classpath.file.whenMerged(new AddBootClasspathAction(project))
-            eclipseModel.classpath.file.whenMerged(new GenerateLibraryDependenciesAction(project))
+            eclipseModel.classpath.file.whenMerged(new AddDependenciesAction(project))
         }
 
         private static boolean isAndroidProject(Project project) {
@@ -327,10 +321,10 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         }
     }
 
-    private static class GenerateLibraryDependenciesAction implements Action<Classpath> {
+    private static class AddDependenciesAction implements Action<Classpath> {
         private final Project project
 
-        GenerateLibraryDependenciesAction(Project project) {
+        AddDependenciesAction(Project project) {
             this.project = project
         }
 
@@ -346,10 +340,6 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                 Library library = (Library) entry
                 if (library.getPath().endsWith(".aar")) {
                     return explodeAarJarFiles(library)
-                }
-            } else if (entry instanceof Container) {
-                if (((Container) entry).getPath().contains("JavaSE")) {
-                    //return Stream.empty()
                 }
             }
             return Stream.of(entry)
