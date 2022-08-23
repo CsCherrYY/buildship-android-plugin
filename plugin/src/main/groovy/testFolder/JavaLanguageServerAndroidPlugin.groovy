@@ -5,9 +5,10 @@ import org.gradle.api.Task
 import org.gradle.api.UnknownTaskException
 import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.Dependency
-import org.gradle.api.file.FileCollection
-import org.gradle.api.internal.FactoryNamedDomainObjectContainer
+import org.gradle.api.internal.DefaultDomainObjectCollection
+import org.gradle.api.internal.DefaultNamedDomainObjectCollection
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency
+import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.plugins.ide.eclipse.model.EclipseModel
 import org.gradle.plugins.ide.eclipse.model.SourceFolder
 import org.gradle.plugins.ide.eclipse.model.ClasspathEntry
@@ -19,149 +20,184 @@ import org.gradle.util.GradleVersion
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.stream.Collectors
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
 
 class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
-    public static final String DEFAULT_OUTPUT_MAIN = "bin/main"
-    public static final String DEFAULT_OUTPUT_TEST = "bin/test"
+    private static final String ANDROID_PROPERTY = "android"
+    // buildship indicator
+    private static final String ECLIPSE_PROPERTY = "eclipse"
 
-    private static final List<String> CLASSPATH_CONFIGURATIONS = Arrays.asList("debugUnitTestRuntimeClasspath",
-            "debugCompileClasspath", "debugAndroidTestRuntimeClasspath")
-    private static final List<String> UNRESOLVED_CLASSPATH_CONFIGURATIONS = Arrays.asList(
-            "implementation"/*, "testImplementation", "androidTestImplementation",
-            "compile", "testCompile", "androidTestCompile", "compileOnly",
-            "api", "testApi", "androidTestApi"*/)
-    private static final String ANDROID_BASE_PLUGIN_ID = "com.android.base"
-    private static final List<String> ANDROID_PLUGIN_IDS = Arrays.asList("android", "android-library", "com.android.application", "com.android.library", "com.android.test")
+    private static final String DEFAULT_OUTPUT_MAIN = "bin/main"
+    private static final String DEFAULT_OUTPUT_TEST = "bin/test"
+    private static final String DEFAULT_OUTPUT_ANDROID_TEST = "bin/androidTest"
+    private static final List<String> ANDROID_PLUGIN_IDS = Arrays.asList("com.android.application", "com.android.library")
+    private static final String ANDROID_KOTLIN_PLUGIN_ID = "kotlin-android"
+    private static final List<String> SUPPORTED_SOURCE_SET_NAMES = Arrays.asList("main", "test", "androidTest")
+    private static final List<String> SUPPORTED_CONFIGURATION_KEYS = Arrays.asList("implementationConfigurationName", "apiConfigurationName", "compileConfigurationName", "compileOnlyConfigurationName", "runtimeOnlyConfigurationName")
+
+    private static final String OPTIONAL_ATTRIBUTE = "optional"
+    private static final String TEST_ATTRIBUTE = "optional"
 
     void apply(Project project) {
-        if (!ResolveAndroidProjectAction.isAndroidProject(project)) {
+        if (!isSupportedAndroidProject(project)) {
             return
         }
-        // buildship indicator
-        if (!project.hasProperty("eclipse")) {
+        if (!project.hasProperty(ECLIPSE_PROPERTY)) {
             return
         }
-
         project.afterEvaluate {
-            ResolveAndroidProjectAction a = new ResolveAndroidProjectAction()
-            a.execute(project)
-        }
-
-        //project.afterEvaluate(new AfterEvaluateProjectAction())
-    }
-
-    private static class AfterEvaluateProjectAction implements Action<Project> {
-        @Override
-        void execute(Project project) {
-            EclipseModel eclipseModel = (EclipseModel) project.property("eclipse")
-            // https://www.eclipse.org/community/eclipse_newsletter/2019/june/buildship.php
+            EclipseModel eclipseModel = (EclipseModel) project.property(ECLIPSE_PROPERTY)
+            // eclipseModel.synchronizationTasks() is available since Gradle 5.4
+            // see: https://www.eclipse.org/community/eclipse_newsletter/2019/june/buildship.php
             if (GradleVersion.version(project.getGradle().getGradleVersion()) >= GradleVersion.version("5.4")) {
-                try {
-                    List<String> syncTasks = new ArrayList<>()
-                    for (String taskName : project.getTasks().names) {
-                        if (taskName.startsWith("compile") && taskName.endsWith("Sources")) {
-                            syncTasks.add(taskName)
-                        }
+                List<Object> synchronizationTasks = new ArrayList<>()
+                for (Object variant : getAndroidDebuggableVariants(project)) {
+                    try {
+                        synchronizationTasks.add(variant.properties.get("variantData").properties.get("taskContainer").properties.get("compileTask"))
+                    } catch (NullPointerException ignored) {
+                        // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
                     }
-                    eclipseModel.synchronizationTasks(syncTasks)
-                } catch (UnknownTaskException ignored) {
-                    // Do nothing
                 }
+                eclipseModel.synchronizationTasks(synchronizationTasks)
             }
+            // Get project configurations from supported sourceSets names and configuration keys,
+            // and add them to eclipseModel.classpath.plusConfigurations
+            addPlusConfiguration(project, eclipseModel)
+            eclipseModel.classpath.setDownloadSources(true)
+            // Remove JDK container since android project should use embedded JDK types included in android.jar
+            eclipseModel.classpath.containers.removeIf(container -> container.contains("JavaSE"))
+            // Add supported source sets to source folders of eclipse model
+            eclipseModel.classpath.file.whenMerged(new AddSourceFoldersAction(project))
+            // Add data binding files to source folders of eclipse model
+            eclipseModel.classpath.file.whenMerged(new AddDataBindingFilesAction(project))
+            // Add R files to source folders of eclipse model
+            eclipseModel.classpath.file.whenMerged(new AddRFilesAction(project))
+            // Add buildconfig files to source folders of eclipse model
+            eclipseModel.classpath.file.whenMerged(new AddBuildConfigFilesAction(project))
+            // Add android.jar to project classpath of eclipse model
+            eclipseModel.classpath.file.whenMerged(new AddAndroidSDKAction(project))
+            // Add project dependencies to project classpath of eclipse model
+            // for aar dependencies, extract classes.jar and add them to project classpath
+            eclipseModel.classpath.file.whenMerged(new AddProjectDependenciesAction(project))
         }
     }
 
-    private static class ResolveAndroidProjectAction implements Action<Project> {
-        @Override
-        void execute(Project project) {
-            if (!isAndroidProject(project)) {
-                return
-            }
-            // buildship indicator
-            if (!project.hasProperty("eclipse")) {
-                return
-            }
-            Task t = project.tasks.getByName("compileDebugSources")
-            FileCollection fiels = t.outputs.files
-            Task t1 = project.tasks.getByName("generateDebugSources")
-            FileCollection fiels1 = t1.outputs.files
-            EclipseModel eclipseModel = (EclipseModel) project.getExtensions().getByType(EclipseModel)
-            addPlusConfiguration(project, eclipseModel)
-            eclipseModel.getClasspath().setDownloadSources(true)
-            // remove JDK container since android project should use embedded JDK types included in android.jar
-            eclipseModel.classpath.containers.removeIf(container -> container.contains("JavaSE"))
-            eclipseModel.classpath.file.whenMerged(new AddSourceFoldersAction(project))
-            eclipseModel.classpath.file.whenMerged(new AddDataBindingClasspathAction(project))
-            eclipseModel.classpath.file.whenMerged(new AddRClasspathAction(project))
-            eclipseModel.classpath.file.whenMerged(new AddBuildConfigAction(project))
-            // add android.jar from Android bootClasspath to project classpath
-            eclipseModel.classpath.file.whenMerged(new AddAndroidSDKAction(project))
-            // extract classes.jar from aar dependencies and add them to classpath
-            eclipseModel.classpath.file.whenMerged(new ExtractAARDependenciesAction(project))
-        }
-
-        private static boolean isAndroidProject(Project project) {
-            if (project.getPlugins().hasPlugin(ANDROID_BASE_PLUGIN_ID)) {
-                return true
-            }
-            for (String pluginId : ANDROID_PLUGIN_IDS) {
-                if (project.getPlugins().hasPlugin(pluginId)) {
-                    return true
-                }
-            }
+    private static boolean isSupportedAndroidProject(Project project) {
+        // kotlin compile task can't be executed via eclipseModel.synchronizationTasks()
+        if (project.plugins.hasPlugin(ANDROID_KOTLIN_PLUGIN_ID)) {
             return false
         }
+        for (String pluginId : ANDROID_PLUGIN_IDS) {
+            if (project.plugins.hasPlugin(pluginId)) {
+                return true
+            }
+        }
+        return false
+    }
 
-        private static void addPlusConfiguration(Project project, EclipseModel eclipseModel) {
-            List<Configuration> plusConfigurations = new ArrayList<>()
-            SortedMap<String, Configuration> configurations = project.getConfigurations().getAsMap()
-//            for (String config : UNRESOLVED_CLASSPATH_CONFIGURATIONS) {
-//                if (configurations.containsKey(config)) {
-//                    Configuration configuration = configurations.get(config)
-//                    // set null target as default target
-////                    for (Dependency dependency : configuration.getDependencies()) {
-////                        if (dependency instanceof DefaultProjectDependency) {
-////                            if (((DefaultProjectDependency) dependency).getTargetConfiguration() == null) {
-////                                ((DefaultProjectDependency) dependency).setTargetConfiguration("default")
-////                            }
-////                        }
-////                    }
-//                    configuration.setCanBeResolved(true)
-//                    plusConfigurations.add(configuration)
-//                }
-//            }
-            for (String configurationName : configurations.keySet()) {
-                for (String config : CLASSPATH_CONFIGURATIONS) {
-                    if (configurationName.toLowerCase().contains(config.toLowerCase())) {
-                        Configuration configuration = configurations.get(configurationName)
-                        for (Dependency dependency : configuration.getDependencies()) {
-                            if (dependency instanceof DefaultProjectDependency) {
-                                if (((DefaultProjectDependency) dependency).getTargetConfiguration() == null) {
-                                    ((DefaultProjectDependency) dependency).setTargetConfiguration("default")
-                                }
-                            }
-                        }
-                        plusConfigurations.add(configuration)
-                    }
+    private static void addPlusConfiguration(Project project, EclipseModel eclipseModel) {
+        List<String> plusConfigurationNames = new ArrayList<>()
+        for (String name : SUPPORTED_SOURCE_SET_NAMES) {
+            Object sourceSet = getAndroidSourceSetByName(project, name)
+            if (sourceSet == null) {
+                continue
+            }
+            for (String key : SUPPORTED_CONFIGURATION_KEYS) {
+                if (sourceSet.properties.containsKey(key)) {
+                    plusConfigurationNames.add(sourceSet.properties.get(key).toString())
                 }
             }
-//            for (String config : CLASSPATH_CONFIGURATIONS) {
-//                if (configurations.containsKey(config)) {
-//                    Configuration configuration = configurations.get(config)
-//                    plusConfigurations.add(configuration)
-//                }
-//            }
-            eclipseModel.getClasspath().getPlusConfigurations().addAll(plusConfigurations)
         }
+        SortedMap<String, Configuration> configurations = project.getConfigurations().getAsMap()
+        for (String config : plusConfigurationNames) {
+            if (configurations.containsKey(config)) {
+                Configuration configuration = configurations.get(config)
+                // set null target as default target
+                for (Dependency dependency : configuration.getDependencies()) {
+                    if (dependency instanceof DefaultProjectDependency) {
+                        if (((DefaultProjectDependency) dependency).getTargetConfiguration() == null) {
+                            ((DefaultProjectDependency) dependency).setTargetConfiguration("default")
+                        }
+                    }
+                }
+                configuration.setCanBeResolved(true)
+                eclipseModel.classpath.plusConfigurations.add(configuration)
+            }
+        }
+    }
+
+    private static Object getAndroidSourceSetByName(Project project, String name) {
+        Object android = project.property(ANDROID_PROPERTY)
+        if (android.properties.containsKey("sourceSets")) {
+            Object sourceSets = android.properties.get("sourceSets")
+            if (sourceSets instanceof DefaultNamedDomainObjectCollection) {
+                DefaultNamedDomainObjectCollection sourceCollection = ((DefaultNamedDomainObjectCollection) sourceSets)
+                if (sourceCollection.names.contains(name)) {
+                    return sourceCollection.getByName(name)
+                }
+            }
+        }
+        return null
+    }
+
+    private static List<Object> getAndroidDebuggableVariants(Project project) {
+        Object android = project.property(ANDROID_PROPERTY)
+        Object variants = null
+        if (project.plugins.hasPlugin("com.android.application")) {
+            // For android application, variants come from applicationVariants property
+            if (android.properties.containsKey("applicationVariants")) {
+                variants = android.properties.get("applicationVariants")
+            }
+        } else if (project.plugins.hasPlugin("com.android.library")) {
+            // For android library, variants come from libraryVariants property
+            if (android.properties.containsKey("libraryVariants")) {
+                variants = android.properties.get("libraryVariants")
+            }
+        }
+        if (variants instanceof DefaultDomainObjectCollection) {
+            return ((DefaultDomainObjectCollection) variants).stream().filter(variant -> {
+                try {
+                    Object debuggable = variant.properties.get("buildType").properties.get("debuggable")
+                    return debuggable instanceof Boolean && ((Boolean) debuggable)
+                } catch (NullPointerException ignored) {
+                    return false
+                }
+            }).collect(Collectors.toList())
+        }
+        return Collections.emptyList()
+    }
+
+    private static void addFolderToSourceFolder(Classpath classpath, Project project, File folder, String outputPath) {
+        if (!folder.exists()) {
+            if (!folder.mkdirs()) {
+                return
+            }
+        }
+        if (!folder.isDirectory()) {
+            return
+        }
+        SourceFolder sourceFolder = new SourceFolder(project.getProjectDir().toURI().relativize(folder.toURI()).toString(), outputPath)
+        sourceFolder.entryAttributes.put(OPTIONAL_ATTRIBUTE, "true")
+        if (outputPath == DEFAULT_OUTPUT_TEST || outputPath == DEFAULT_OUTPUT_ANDROID_TEST) {
+            sourceFolder.getEntryAttributes().put(TEST_ATTRIBUTE, "true")
+        }
+        classpath.entries.add(sourceFolder)
     }
 
     private static class AddSourceFoldersAction implements Action<Classpath> {
-
+        // <sourceSetName, outputPath>
+        private static final Map<String, String> SUPPORTED_SOURCE_SETS = new HashMap<>()
         private final Project project
+
+        static {
+            SUPPORTED_SOURCE_SETS.put("main", DEFAULT_OUTPUT_MAIN)
+            SUPPORTED_SOURCE_SETS.put("test", DEFAULT_OUTPUT_TEST)
+            SUPPORTED_SOURCE_SETS.put("androidTest", DEFAULT_OUTPUT_ANDROID_TEST)
+        }
 
         AddSourceFoldersAction(Project project) {
             this.project = project
@@ -169,129 +205,128 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
         @Override
         void execute(Classpath classpath) {
-            Object android = project.property("android")
-            try {
-                Object sourceSets = android.getClass().getMethod("getSourceSets").invoke(android)
-                if (sourceSets instanceof FactoryNamedDomainObjectContainer) {
-                    addSourceFolder(classpath, (FactoryNamedDomainObjectContainer) sourceSets, "main", DEFAULT_OUTPUT_MAIN)
-                    addSourceFolder(classpath, (FactoryNamedDomainObjectContainer) sourceSets, "test", DEFAULT_OUTPUT_TEST)
-                    addSourceFolder(classpath, (FactoryNamedDomainObjectContainer) sourceSets, "androidTest", DEFAULT_OUTPUT_TEST)
+            for (String key : SUPPORTED_SOURCE_SETS.keySet()) {
+                Object sourceSet = getAndroidSourceSetByName(project, key)
+                if (sourceSet == null) {
+                    continue
                 }
-            } catch (Exception ignored) {
-                // Do nothing
-            }
-        }
-
-        private void addSourceFolder(Classpath classpath, FactoryNamedDomainObjectContainer sourceSets, String sourceSetName, String outputPath) {
-            Object mainSourceSet = sourceSets.getByName(sourceSetName)
-            Object javaDirectories = null
-            try {
-                javaDirectories = mainSourceSet.getClass().getMethod("getJavaDirectories").invoke(mainSourceSet)
-            } catch (Exception ignored) {
-                // Do nothing
-            }
-            if (javaDirectories instanceof Set) {
-                for (Object javaDirectory : ((Set) javaDirectories)) {
-                    if (javaDirectory instanceof File) {
-                        File JavaSourceDirectory = ((File) javaDirectory)
-                        if (!JavaSourceDirectory.exists()) {
-                            return
-                        }
-                        URI JavaSourceDirectoryURI = JavaSourceDirectory.toURI()
-                        File projectDirectory = project.getProjectDir()
-                        URI projectDirectoryURI = projectDirectory.toURI()
-                        URI relativeURI = projectDirectoryURI.relativize(JavaSourceDirectoryURI)
-                        SourceFolder f = new SourceFolder(relativeURI.getPath(), outputPath)
-                        if (outputPath == DEFAULT_OUTPUT_TEST) {
-                            f.getEntryAttributes().put("test", "true")
-                        }
-                        classpath.getEntries().add(f)
-                    }
-                }
-            }
-        }
-    }
-
-    private static class AddDataBindingClasspathAction implements Action<Classpath> {
-        private final Project project
-        private final FileReferenceFactory fileReferenceFactory
-
-        AddDataBindingClasspathAction(Project project) {
-            this.project = project
-            this.fileReferenceFactory = new FileReferenceFactory()
-        }
-
-        @Override
-        void execute(Classpath classpath) {
-            Path dataBindingPath = Paths.get(project.buildDir.absolutePath, "generated", "data_binding_base_class_source_out", "debug", "out")
-            if (dataBindingPath.toFile().exists()) {
-                classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(dataBindingPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
-            }
-        }
-    }
-
-    private static class AddRClasspathAction implements Action<Classpath> {
-
-        private final Project project
-        private final FileReferenceFactory fileReferenceFactory
-
-        AddRClasspathAction(Project project) {
-            this.project = project
-            this.fileReferenceFactory = new FileReferenceFactory()
-        }
-
-        @Override
-        void execute(Classpath classpath) {
-            // from AGP 3.6 Android R class files are generated directly.
-            // See: https://android-developers.googleblog.com/2020/02/android-studio-36.html
-            Path intermediatesAbsolutePath = Paths.get(project.buildDir.absolutePath, "intermediates")
-            File intermediatesAbsoluteFolder = intermediatesAbsolutePath.toFile()
-            if (intermediatesAbsoluteFolder.exists() && intermediatesAbsoluteFolder.isDirectory()) {
-                for (File intermediate : intermediatesAbsoluteFolder.listFiles()) {
-                    if (intermediate.getAbsolutePath().endsWith("r_class_jar")) {
-                        Path RPath = Paths.get(intermediate.getPath(), "debug", "R.jar")
-                        if (RPath.toFile().exists()) {
-                            Path projectPath = project.getProjectDir().toPath()
-                            Path relativePath = projectPath.relativize(RPath)
-                            classpath.getEntries().add(new Library(this.fileReferenceFactory.fromPath(relativePath.toString())))
-                            return
-                        } else {
-                            RPath = Paths.get(intermediate.getPath(), "debug", "generateDebugRFile", "R.jar")
-                            if (RPath.toFile().exists()) {
-                                Path projectPath = project.getProjectDir().toPath()
-                                Path relativePath = projectPath.relativize(RPath)
-                                classpath.getEntries().add(new Library(this.fileReferenceFactory.fromPath(relativePath.toString())))
-                                return
+                if (sourceSet.properties.containsKey("javaDirectories")) {
+                    Object javaDirectories = sourceSet.properties.get("javaDirectories")
+                    if (javaDirectories instanceof Collection) {
+                        for (Object javaDirectory : (Collection) javaDirectories) {
+                            if (javaDirectory instanceof File) {
+                                addFolderToSourceFolder(classpath, project, (File) javaDirectory, SUPPORTED_SOURCE_SETS.get(key))
                             }
                         }
                     }
                 }
             }
-            // TODO: support variable R folders
-            Path RAbsoluteFolderPath = Paths.get(project.buildDir.absolutePath, "generated", "not_namespaced_r_class_sources", "debug", "processDebugResources", "r")
-            if (RAbsoluteFolderPath.toFile().exists()) {
-                classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(RAbsoluteFolderPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
-            } else {
-                RAbsoluteFolderPath = Paths.get(project.buildDir.absolutePath, "generated", "source", "r", "debug")
-                if (RAbsoluteFolderPath.toFile().exists()) {
-                    classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(RAbsoluteFolderPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
+        }
+    }
+
+    private static class AddDataBindingFilesAction implements Action<Classpath> {
+        private final Project project
+        private final FileReferenceFactory fileReferenceFactory
+
+        AddDataBindingFilesAction(Project project) {
+            this.project = project
+            this.fileReferenceFactory = new FileReferenceFactory()
+        }
+
+        @Override
+        void execute(Classpath classpath) {
+            for (Object variant : getAndroidDebuggableVariants(project)) {
+                try {
+                    // TODO: get dataBinding task from variants?
+                    String variantName = variant.properties.get("name")
+                    String taskName = "dataBindingGenBaseClasses" + variantName.substring(0, 1).toUpperCase() + variantName.substring(1)
+                    Task dataBindingGenTask = project.tasks.getByName(taskName)
+                    Object outFolder = dataBindingGenTask.properties.get("sourceOutFolder").properties.get("orNull").properties.get("asFile")
+                    if (outFolder instanceof File) {
+                        addFolderToSourceFolder(classpath, project, (File) outFolder, DEFAULT_OUTPUT_MAIN)
+                    }
+                } catch (NullPointerException | UnknownTaskException ignored) {
+                    // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
                 }
             }
         }
     }
 
-    private static class AddBuildConfigAction implements Action<Classpath> {
+    private static class AddRFilesAction implements Action<Classpath> {
+        private final Project project
+        private final FileReferenceFactory fileReferenceFactory
+
+        AddRFilesAction(Project project) {
+            this.project = project
+            this.fileReferenceFactory = new FileReferenceFactory()
+        }
+
+        @Override
+        void execute(Classpath classpath) {
+            for (Object variant : getAndroidDebuggableVariants(project)) {
+                try {
+                    Object outputs = variant.properties.get("outputs")
+                    if (outputs instanceof DefaultNamedDomainObjectCollection) {
+                        for (Object output : outputs) {
+                            // output.processResources.sourceOutputDir || output.processResources.RClassOutputJar
+                            Object processResourcesTask = output.properties.get("processResources")
+                            if (processResourcesTask.properties.containsKey("sourceOutputDir")) {
+                                Object outputDir = processResourcesTask.properties.get("sourceOutputDir")
+                                if (outputDir instanceof File) {
+                                    addRFileToClasspath(classpath, (File) outputDir)
+                                    continue
+                                }
+                            }
+                            if (processResourcesTask.properties.containsKey("RClassOutputJar")) {
+                                Object outputJar = processResourcesTask.properties.get("RClassOutputJar").properties.get("orNull").properties.get("asFile")
+                                if (outputJar instanceof File) {
+                                    addRFileToClasspath(classpath, (File) outputJar)
+                                }
+                            }
+                        }
+                    }
+                } catch (NullPointerException ignored) {
+                    // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
+                }
+            }
+        }
+
+        private void addRFileToClasspath(Classpath classpath, File RFile) {
+            if (RFile.name.endsWith(".jar")) {
+                Library library = new Library(this.fileReferenceFactory.fromPath(project.getProjectDir().toPath().relativize(RFile.toPath()).toString()))
+                library.entryAttributes.put(OPTIONAL_ATTRIBUTE, "true")
+                classpath.getEntries().add(library)
+            } else {
+                addFolderToSourceFolder(classpath, this.project, RFile, DEFAULT_OUTPUT_MAIN)
+            }
+        }
+    }
+
+    private static class AddBuildConfigFilesAction implements Action<Classpath> {
         private final Project project
 
-        AddBuildConfigAction(Project project) {
+        AddBuildConfigFilesAction(Project project) {
             this.project = project
         }
 
         @Override
         void execute(Classpath classpath) {
-            Path buildConfigPath = Paths.get(project.buildDir.absolutePath, "generated", "source", "buildConfig", "debug")
-            if (buildConfigPath.toFile().exists()) {
-                classpath.getEntries().add(new SourceFolder(project.getProjectDir().toURI().relativize(buildConfigPath.toUri()).toString(), DEFAULT_OUTPUT_MAIN))
+            for (Object variant : getAndroidDebuggableVariants(project)) {
+                try {
+                    // for old AGP, the file instance can be directly got via variant.generateBuildConfig.sourceOutputDir
+                    Object outputDir = variant.properties.get("generateBuildConfig").properties.get("sourceOutputDir")
+                    if (outputDir instanceof File) {
+                        addFolderToSourceFolder(classpath, this.project, (File) outputDir, DEFAULT_OUTPUT_MAIN)
+                    } else {
+                        // for newer AGP, the file instance can be got via variant.generateBuildConfig.sourceOutputDir.orNull.asFile
+                        Object outputDirFile = outputDir.properties.get("orNull").properties.get("asFile")
+                        if (outputDirFile instanceof File) {
+                            addFolderToSourceFolder(classpath, this.project, (File) outputDirFile, DEFAULT_OUTPUT_MAIN)
+                        }
+                    }
+                } catch (NullPointerException ignored) {
+                    // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
+                }
             }
         }
     }
@@ -307,33 +342,9 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
         @Override
         void execute(Classpath classpath) {
-            Object android = project.property("android")
+            Object android = project.property(ANDROID_PROPERTY)
             try {
-                Object buildFeatures = android.getClass().getMethod("getBuildFeatures").invoke(android)
-                Object aaptOptions = android.getClass().getMethod("getAaptOptions").invoke(android)
-                Object adbOptions = android.getClass().getMethod("getAdbOptions").invoke(android)
-                Object getDataBinding = android.getClass().getMethod("getDataBinding").invoke(android)
-                Object getDefaultConfig = android.getClass().getMethod("getDefaultConfig").invoke(android)
-                Object getComposeOptions = android.getClass().getMethod("getComposeOptions").invoke(android)
-                Object getBuildOutputs = android.getClass().getMethod("getBuildOutputs").invoke(android)
-                Object getDexOptions = android.getClass().getMethod("getDexOptions").invoke(android)
-                Object getBuildTypes = android.getClass().getMethod("getBuildTypes").invoke(android)
-                Object getTestOptions = android.getClass().getMethod("getTestOptions").invoke(android)
-                Object getSplits = android.getClass().getMethod("getSplits").invoke(android)
-                Object getViewBinding = android.getClass().getMethod("getViewBinding").invoke(android)
-                Object getProductFlavors = android.getClass().getMethod("getProductFlavors").invoke(android)
-                Object getFlavorDimensionList = android.getClass().getMethod("getFlavorDimensionList").invoke(android)
-                Object getAndroidResources = android.getClass().getMethod("getAndroidResources").invoke(android)
-                Object getDependenciesInfo = android.getClass().getMethod("getDependenciesInfo").invoke(android)
-                Object getAssetPacks = android.getClass().getMethod("getAssetPacks").invoke(android)
-                Object getInstallation = android.getClass().getMethod("getInstallation").invoke(android)
-                // variant -> outputs -> taskContainer
-                Object getApplicationVariants = android.getClass().getMethod("getApplicationVariants").invoke(android)
-                Object getUnitTestVariants = android.getClass().getMethod("getUnitTestVariants").invoke(android)
-                Object getTestVariants = android.getClass().getMethod("getTestVariants").invoke(android)
-                Object getBundle = android.getClass().getMethod("getBundle").invoke(android)
-                Object bootClasspathList = android.getClass().getMethod("getBootClasspath").invoke(android)
-                // Object getPackingOptions = android.getClass().getMethod("getPackagingOptions").invoke(android)
+                Object bootClasspathList = android.properties.get("bootClasspath")
                 if (bootClasspathList instanceof List) {
                     for (Object bootClasspath : ((List) bootClasspathList)) {
                         if (bootClasspath instanceof File) {
@@ -344,14 +355,13 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                         }
                     }
                 }
-            } catch (Exception ignored) {
-                // Do nothing
+            } catch (NullPointerException ignored) {
+                // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
             }
         }
     }
 
-    private static class ExtractAARDependenciesAction implements Action<Classpath> {
-
+    private static class AddProjectDependenciesAction implements Action<Classpath> {
         private static final String EXTRACT_AAR_RELATIVE_PATH = "aarLibraries"
         private static final String AAR_EXTENSION = ".aar"
         private static final String DEPENDENCY_ENTRY_NAME = "classes.jar"
@@ -359,7 +369,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         private final Project project
         private final FileReferenceFactory fileReferenceFactory
 
-        ExtractAARDependenciesAction(Project project) {
+        AddProjectDependenciesAction(Project project) {
             this.project = project
             this.fileReferenceFactory = new FileReferenceFactory()
         }
@@ -384,14 +394,10 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             String libraryName = aarLibrary.getModuleVersion().toString().replaceAll(":", "-")
             Path libraryFolderPath = Paths.get(project.buildDir.absolutePath, EXTRACT_AAR_RELATIVE_PATH)
             File libraryFolder = libraryFolderPath.toFile()
-            try {
-                if (!libraryFolder.exists()) {
-                    if (!libraryFolder.mkdirs()) {
-                        return null
-                    }
+            if (!libraryFolder.exists()) {
+                if (!libraryFolder.mkdirs()) {
+                    return null
                 }
-            } catch (SecurityException ignored) {
-                return null
             }
             Path libraryPath = libraryFolderPath.resolve(Paths.get(libraryName + ".jar"))
             File libraryFile = libraryPath.toFile()
