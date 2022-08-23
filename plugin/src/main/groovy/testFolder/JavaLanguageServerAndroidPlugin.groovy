@@ -1,9 +1,11 @@
 import org.gradle.api.Action
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.Task
 import org.gradle.api.UnknownTaskException
 import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.Dependency
+import org.gradle.api.file.FileCollection
 import org.gradle.api.internal.FactoryNamedDomainObjectContainer
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency
 import org.gradle.plugins.ide.eclipse.model.EclipseModel
@@ -83,6 +85,10 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             if (!project.hasProperty("eclipse")) {
                 return
             }
+            Task t = project.tasks.getByName("compileDebugSources")
+            FileCollection fiels = t.outputs.files
+            Task t1 = project.tasks.getByName("generateDebugSources")
+            FileCollection fiels1 = t1.outputs.files
             EclipseModel eclipseModel = (EclipseModel) project.getExtensions().getByType(EclipseModel)
             addPlusConfiguration(project, eclipseModel)
             eclipseModel.getClasspath().setDownloadSources(true)
@@ -303,7 +309,31 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         void execute(Classpath classpath) {
             Object android = project.property("android")
             try {
+                Object buildFeatures = android.getClass().getMethod("getBuildFeatures").invoke(android)
+                Object aaptOptions = android.getClass().getMethod("getAaptOptions").invoke(android)
+                Object adbOptions = android.getClass().getMethod("getAdbOptions").invoke(android)
+                Object getDataBinding = android.getClass().getMethod("getDataBinding").invoke(android)
+                Object getDefaultConfig = android.getClass().getMethod("getDefaultConfig").invoke(android)
+                Object getComposeOptions = android.getClass().getMethod("getComposeOptions").invoke(android)
+                Object getBuildOutputs = android.getClass().getMethod("getBuildOutputs").invoke(android)
+                Object getDexOptions = android.getClass().getMethod("getDexOptions").invoke(android)
+                Object getBuildTypes = android.getClass().getMethod("getBuildTypes").invoke(android)
+                Object getTestOptions = android.getClass().getMethod("getTestOptions").invoke(android)
+                Object getSplits = android.getClass().getMethod("getSplits").invoke(android)
+                Object getViewBinding = android.getClass().getMethod("getViewBinding").invoke(android)
+                Object getProductFlavors = android.getClass().getMethod("getProductFlavors").invoke(android)
+                Object getFlavorDimensionList = android.getClass().getMethod("getFlavorDimensionList").invoke(android)
+                Object getAndroidResources = android.getClass().getMethod("getAndroidResources").invoke(android)
+                Object getDependenciesInfo = android.getClass().getMethod("getDependenciesInfo").invoke(android)
+                Object getAssetPacks = android.getClass().getMethod("getAssetPacks").invoke(android)
+                Object getInstallation = android.getClass().getMethod("getInstallation").invoke(android)
+                // variant -> outputs -> taskContainer
+                Object getApplicationVariants = android.getClass().getMethod("getApplicationVariants").invoke(android)
+                Object getUnitTestVariants = android.getClass().getMethod("getUnitTestVariants").invoke(android)
+                Object getTestVariants = android.getClass().getMethod("getTestVariants").invoke(android)
+                Object getBundle = android.getClass().getMethod("getBundle").invoke(android)
                 Object bootClasspathList = android.getClass().getMethod("getBootClasspath").invoke(android)
+                // Object getPackingOptions = android.getClass().getMethod("getPackagingOptions").invoke(android)
                 if (bootClasspathList instanceof List) {
                     for (Object bootClasspath : ((List) bootClasspathList)) {
                         if (bootClasspath instanceof File) {
