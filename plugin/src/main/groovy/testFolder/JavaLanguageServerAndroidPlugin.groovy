@@ -8,7 +8,6 @@ import org.gradle.api.artifacts.Dependency
 import org.gradle.api.internal.DefaultDomainObjectCollection
 import org.gradle.api.internal.DefaultNamedDomainObjectCollection
 import org.gradle.api.internal.artifacts.dependencies.DefaultProjectDependency
-import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.plugins.ide.eclipse.model.EclipseModel
 import org.gradle.plugins.ide.eclipse.model.SourceFolder
 import org.gradle.plugins.ide.eclipse.model.ClasspathEntry
@@ -34,6 +33,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
     private static final String DEFAULT_OUTPUT_MAIN = "bin/main"
     private static final String DEFAULT_OUTPUT_TEST = "bin/test"
     private static final String DEFAULT_OUTPUT_ANDROID_TEST = "bin/androidTest"
+
     private static final List<String> ANDROID_PLUGIN_IDS = Arrays.asList("com.android.application", "com.android.library")
     private static final String ANDROID_KOTLIN_PLUGIN_ID = "kotlin-android"
     private static final List<String> SUPPORTED_SOURCE_SET_NAMES = Arrays.asList("main", "test", "androidTest")
@@ -87,7 +87,6 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
     }
 
     private static boolean isSupportedAndroidProject(Project project) {
-        // kotlin compile task can't be executed via eclipseModel.synchronizationTasks()
         if (project.plugins.hasPlugin(ANDROID_KOTLIN_PLUGIN_ID)) {
             return false
         }
