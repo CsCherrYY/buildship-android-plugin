@@ -20,7 +20,6 @@ import org.gradle.util.GradleVersion
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import java.util.stream.Collectors
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
@@ -171,14 +170,18 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             }
         }
         if (variants instanceof DefaultDomainObjectCollection) {
-            return ((DefaultDomainObjectCollection) variants).stream().filter(variant -> {
+            List<Object> androidDebuggableVariants = new ArrayList<>()
+            for (Object variant : variants) {
                 try {
                     Object debuggable = variant.properties.get("buildType").properties.get("debuggable")
-                    return debuggable instanceof Boolean && ((Boolean) debuggable)
+                    if (debuggable instanceof Boolean && ((Boolean) debuggable)) {
+                        androidDebuggableVariants.add(variant)
+                    }
                 } catch (NullPointerException ignored) {
-                    return false
+                    // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
                 }
-            }).collect(Collectors.toList())
+            }
+            return androidDebuggableVariants
         }
         return Collections.emptyList()
     }
