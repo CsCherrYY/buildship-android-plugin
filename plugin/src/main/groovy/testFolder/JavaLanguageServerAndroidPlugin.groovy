@@ -73,7 +73,13 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             addPlusConfiguration(project, eclipseModel, androidSourceSets)
             eclipseModel.classpath.setDownloadSources(true)
             // Remove JDK container since android project should use embedded JDK types included in android.jar
-            eclipseModel.classpath.containers.removeIf(container -> container.contains("JavaSE"))
+            List<String> containers = new ArrayList<>()
+            for (String containerName : eclipseModel.classpath.containers) {
+                if (containerName.contains("JavaSE")) {
+                    containers.add(containerName)
+                }
+            }
+            eclipseModel.classpath.containers.removeAll(containers)
             // Add supported source sets to source folders of eclipse model
             eclipseModel.classpath.file.whenMerged(new AddSourceFoldersAction(project, androidSourceSets))
             // Add data binding files to source folders of eclipse model
@@ -338,7 +344,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             if (RFile.name.endsWith(".jar")) {
                 Library library = new Library(this.fileReferenceFactory.fromPath(project.getProjectDir().toPath().relativize(RFile.toPath()).toString()))
                 library.entryAttributes.put(OPTIONAL_ATTRIBUTE, "true")
-                classpath.getEntries().add(library)
+                classpath.entries.add(library)
             } else {
                 addFolderToSourceFolder(classpath, this.project, RFile, DEFAULT_OUTPUT_MAIN)
             }
@@ -387,7 +393,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
         @Override
         void execute(Classpath classpath) {
-            classpath.getEntries().add(new Library(fileReferenceFactory.fromFile(androidSDKFile)))
+            classpath.entries.add(new Library(fileReferenceFactory.fromFile(androidSDKFile)))
         }
     }
 
