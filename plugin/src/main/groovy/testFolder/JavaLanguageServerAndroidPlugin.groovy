@@ -441,7 +441,9 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             Path libraryPath = libraryFolderPath.resolve(Paths.get(libraryName + ".jar"))
             File libraryFile = libraryPath.toFile()
             if (!libraryFile.exists()) {
-                try (ZipFile zipFile = new ZipFile(new File(aarLibrary.getPath()))) {
+                ZipFile zipFile = null
+                try {
+                    zipFile = new ZipFile(new File(aarLibrary.getPath()))
                     for (ZipEntry entry : zipFile.entries()) {
                         if (entry.name == DEPENDENCY_ENTRY_NAME) {
                             InputStream ins = zipFile.getInputStream(entry)
@@ -451,6 +453,10 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
                     }
                 } catch (IOException | NullPointerException ignored) {
                     return null
+                } finally {
+                    if (zipFile != null) {
+                        zipFile.close()
+                    }
                 }
             }
             if (libraryFile.exists()) {
