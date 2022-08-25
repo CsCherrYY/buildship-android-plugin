@@ -23,7 +23,6 @@ import java.util.stream.Collectors
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
-
 class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
 
     private static final String ANDROID_PROPERTY = "android"
@@ -40,13 +39,17 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
     private static final List<String> SUPPORTED_CONFIGURATION_KEYS = Arrays.asList("implementationConfigurationName", "apiConfigurationName", "compileConfigurationName", "compileOnlyConfigurationName", "runtimeOnlyConfigurationName")
 
     private static final String OPTIONAL_ATTRIBUTE = "optional"
-    private static final String TEST_ATTRIBUTE = "optional"
+    private static final String TEST_ATTRIBUTE = "test"
 
     void apply(Project project) {
         if (!isSupportedAndroidProject(project)) {
             return
         }
         if (!project.hasProperty(ECLIPSE_PROPERTY)) {
+            return
+        }
+        File androidSDKFile = getAndroidSDKFile(project)
+        if (androidSDKFile == null) {
             return
         }
         project.afterEvaluate {
@@ -79,7 +82,7 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             // Add buildconfig files to source folders of eclipse model
             eclipseModel.classpath.file.whenMerged(new AddBuildConfigFilesAction(project))
             // Add android.jar to project classpath of eclipse model
-            eclipseModel.classpath.file.whenMerged(new AddAndroidSDKAction(project))
+            eclipseModel.classpath.file.whenMerged(new AddAndroidSDKAction(androidSDKFile))
             // Add project dependencies to project classpath of eclipse model
             // for aar dependencies, extract classes.jar and add them to project classpath
             eclipseModel.classpath.file.whenMerged(new AddProjectDependenciesAction(project))
@@ -96,6 +99,26 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
             }
         }
         return false
+    }
+
+    private static File getAndroidSDKFile(Project project) {
+        Object android = project.property(ANDROID_PROPERTY)
+        try {
+            Object bootClasspathList = android.properties.get("bootClasspath")
+            if (bootClasspathList instanceof List) {
+                for (Object bootClasspath : ((List) bootClasspathList)) {
+                    if (bootClasspath instanceof File) {
+                        File file = (File) bootClasspath
+                        if (file.getAbsolutePath().endsWith("android.jar") && file.exists()) {
+                            return file
+                        }
+                    }
+                }
+            }
+        } catch (NullPointerException ignored) {
+            // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
+        }
+        return null
     }
 
     private static void addPlusConfiguration(Project project, EclipseModel eclipseModel) {
@@ -331,32 +354,17 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
     }
 
     private static class AddAndroidSDKAction implements Action<Classpath> {
-        private final Project project
         private final FileReferenceFactory fileReferenceFactory
+        private final File androidSDKFile
 
-        AddAndroidSDKAction(Project project) {
-            this.project = project
+        AddAndroidSDKAction(File androidSDKFile) {
             this.fileReferenceFactory = new FileReferenceFactory()
+            this.androidSDKFile = androidSDKFile
         }
 
         @Override
         void execute(Classpath classpath) {
-            Object android = project.property(ANDROID_PROPERTY)
-            try {
-                Object bootClasspathList = android.properties.get("bootClasspath")
-                if (bootClasspathList instanceof List) {
-                    for (Object bootClasspath : ((List) bootClasspathList)) {
-                        if (bootClasspath instanceof File) {
-                            File file = (File) bootClasspath
-                            if (file.getAbsolutePath().endsWith("android.jar")) {
-                                classpath.getEntries().add(new Library(fileReferenceFactory.fromFile(file)))
-                            }
-                        }
-                    }
-                }
-            } catch (NullPointerException ignored) {
-                // NPE occurs when the variant doesn't have related properties, we just skip these unsupported scenarios
-            }
+            classpath.getEntries().add(new Library(fileReferenceFactory.fromFile(androidSDKFile)))
         }
     }
 
@@ -422,4 +430,3 @@ class JavaLanguageServerAndroidPlugin implements Plugin<Project> {
         }
     }
 }
-
